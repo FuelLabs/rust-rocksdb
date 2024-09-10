@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::{env, fs, path::PathBuf, process::Command};
+use walkdir::{DirEntry, WalkDir};
 
 fn link(name: &str, bundled: bool) {
     use std::env::var;
@@ -345,23 +346,30 @@ fn main() {
     }
     bindgen_rocksdb();
 
-    if !try_to_find_and_link_lib("ROCKSDB") {
-        println!("cargo:rerun-if-changed=rocksdb/");
-        fail_on_empty_directory("rocksdb");
-        build_rocksdb();
+    if let Some(old_output) = get_any_rocksdb_output_lib() {
+        println!("cargo:out_dir={}", old_output);
     } else {
-        let target = env::var("TARGET").unwrap();
-        // according to https://github.com/alexcrichton/cc-rs/blob/master/src/lib.rs#L2189
-        if target.contains("apple") || target.contains("freebsd") || target.contains("openbsd") {
-            println!("cargo:rustc-link-lib=dylib=c++");
-        } else if target.contains("linux") {
-            println!("cargo:rustc-link-lib=dylib=stdc++");
+        if !try_to_find_and_link_lib("ROCKSDB") {
+            println!("cargo:rerun-if-changed=rocksdb/");
+            fail_on_empty_directory("rocksdb");
+            build_rocksdb();
+        } else {
+            let target = env::var("TARGET").unwrap();
+            // according to https://github.com/alexcrichton/cc-rs/blob/master/src/lib.rs#L2189
+            if target.contains("apple") || target.contains("freebsd") || target.contains("openbsd")
+            {
+                println!("cargo:rustc-link-lib=dylib=c++");
+            } else if target.contains("linux") {
+                println!("cargo:rustc-link-lib=dylib=stdc++");
+            }
         }
-    }
-    if cfg!(feature = "snappy") && !try_to_find_and_link_lib("SNAPPY") {
-        println!("cargo:rerun-if-changed=snappy/");
-        fail_on_empty_directory("snappy");
-        build_snappy();
+
+        if cfg!(feature = "snappy") && !try_to_find_and_link_lib("SNAPPY") {
+            println!("cargo:rerun-if-changed=snappy/");
+            fail_on_empty_directory("snappy");
+            build_snappy();
+        }
+        println!("cargo:out_dir={}", env::var("OUT_DIR").unwrap());
     }
 
     // Allow dependent crates to locate the sources and output directory of
@@ -371,5 +379,37 @@ fn main() {
         "cargo:cargo_manifest_dir={}",
         env::var("CARGO_MANIFEST_DIR").unwrap()
     );
-    println!("cargo:out_dir={}", env::var("OUT_DIR").unwrap());
+}
+
+fn get_target_dir() -> PathBuf {
+    let mut out_dir = std::path::PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
+    out_dir.pop();
+    out_dir.pop();
+    out_dir
+}
+
+fn get_any_rocksdb_output_lib() -> Option<String> {
+    get_any_rocksdb_output_lib_path().map(|p| p.to_string_lossy().to_string())
+}
+
+fn get_any_rocksdb_output_lib_path() -> Option<PathBuf> {
+    let target_dir = get_target_dir();
+    let mut rocksdb_dirs = WalkDir::new(target_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| rocksdb_dir(e));
+    rocksdb_dirs.next().map(|e| {
+        let mut output_dir = e.path().to_path_buf();
+        output_dir.pop();
+        output_dir
+    })
+}
+
+fn rocksdb_dir(entry: &DirEntry) -> bool {
+    entry.file_type().is_file()
+        && entry
+            .file_name()
+            .to_str()
+            .map(|s| s.starts_with("librocksdb.a"))
+            .unwrap_or(false)
 }
