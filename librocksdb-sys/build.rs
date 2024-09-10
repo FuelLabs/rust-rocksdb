@@ -45,7 +45,7 @@ fn bindgen_rocksdb() {
         .expect("unable to write rocksdb bindings");
 }
 
-fn build_rocksdb() {
+fn build_rocksdb<P: AsRef<Path>>(output: P) {
     let target = env::var("TARGET").unwrap();
 
     let mut config = cc::Build::new();
@@ -259,10 +259,11 @@ fn build_rocksdb() {
 
     config.cpp(true);
     config.flag_if_supported("-std=c++17");
+    config.out_dir(output);
     config.compile("librocksdb.a");
 }
 
-fn build_snappy() {
+fn build_snappy<P: AsRef<Path>>(output: P) {
     let target = env::var("TARGET").unwrap();
     let endianness = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap();
     let mut config = cc::Build::new();
@@ -288,6 +289,7 @@ fn build_snappy() {
     config.file("snappy/snappy-sinksource.cc");
     config.file("snappy/snappy-c.cc");
     config.cpp(true);
+    config.out_dir(output);
     config.compile("libsnappy.a");
 }
 
@@ -302,13 +304,16 @@ fn try_to_find_and_link_lib(lib_name: &str) -> bool {
     println!("cargo:rerun-if-env-changed={lib_name}_LIB_DIR");
     println!("cargo:rerun-if-env-changed={lib_name}_STATIC");
 
-    if let Ok(lib_dir) = env::var(format!("{lib_name}_LIB_DIR")) {
+    let output_path = get_output_path();
+
+    if output_path.exists() {
+        let lib_dir = output_path.to_string_lossy();
         println!("cargo:rustc-link-search=native={lib_dir}");
-        let mode = match env::var_os(format!("{lib_name}_STATIC")) {
-            Some(_) => "static",
-            None => "dylib",
-        };
-        println!("cargo:rustc-link-lib={}={}", mode, lib_name.to_lowercase());
+        println!(
+            "cargo:rustc-link-lib={}={}",
+            "dylib",
+            lib_name.to_lowercase()
+        );
         return true;
     }
     false
@@ -350,10 +355,12 @@ fn main() {
     }
     bindgen_rocksdb();
 
+    let output_path = get_output_path();
+
     if !try_to_find_and_link_lib("ROCKSDB") {
         println!("cargo:rerun-if-changed=rocksdb/");
         fail_on_empty_directory("rocksdb");
-        build_rocksdb();
+        build_rocksdb(&output_path);
     } else {
         let target = env::var("TARGET").unwrap();
         // according to https://github.com/alexcrichton/cc-rs/blob/master/src/lib.rs#L2189
@@ -363,10 +370,11 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=stdc++");
         }
     }
+
     if cfg!(feature = "snappy") && !try_to_find_and_link_lib("SNAPPY") {
         println!("cargo:rerun-if-changed=snappy/");
         fail_on_empty_directory("snappy");
-        build_snappy();
+        build_snappy(&output_path);
     }
 
     // Allow dependent crates to locate the sources and output directory of
@@ -377,4 +385,21 @@ fn main() {
         env::var("CARGO_MANIFEST_DIR").unwrap()
     );
     println!("cargo:out_dir={}", env::var("OUT_DIR").unwrap());
+}
+
+fn get_output_path() -> PathBuf {
+    let out_dir = env::var("OUT_DIR").expect("`OUT_DIR` is not set");
+
+    // Set the own sub-target directory to prevent a cargo deadlock (cargo locks
+    // a target dir exclusive). This directory is also used as a cache directory
+    // to avoid building the same WASM binary each time. Also, caching reuses
+    // the artifacts from the previous build in the case if the executor is changed.
+    //
+    // The cache dir is: "target/{debug/release/other}/rocksdb-cache"
+    let mut cache_dir: PathBuf = out_dir.clone().into();
+    cache_dir.pop();
+    cache_dir.pop();
+    cache_dir.pop();
+    cache_dir.push("rocksdb-cache");
+    cache_dir
 }
